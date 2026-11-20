@@ -1,0 +1,180 @@
+*tracespace.txt*    Live execution-flow diagrams for C and C++
+
+                                                    *tracespace* *tracespace.nvim*
+
+tracespace draws a left-to-right diagram of how the current C/C++ file
+executes, in a split next to your code. Each function is a box, starting from
+`main()`; loops are arcs above the boxes; the calls a function makes are
+smaller boxes below it. The diagram follows the buffer as you type, including
+changes you have not saved.
+
+==============================================================================
+CONTENTS                                                  *tracespace-contents*
+
+    1. Requirements ............................ |tracespace-requirements|
+    2. Setup ................................... |tracespace-setup|
+    3. Commands ................................ |tracespace-commands|
+    4. Keys in the diagram ..................... |tracespace-keys|
+    5. Reading the diagram ..................... |tracespace-legend|
+    6. Lua API ................................. |tracespace-api|
+    7. How it works ............................ |tracespace-protocol|
+    8. Troubleshooting ......................... |tracespace-troubleshooting|
+
+==============================================================================
+1. REQUIREMENTS                                       *tracespace-requirements*
+
+- Neovim 0.10 or newer (the plugin uses |vim.uv|).
+- The `tracespace` executable on your `$PATH`, or its full path given as
+  `binary` in |tracespace.setup()|. Build it from the repository root: >sh
+
+      cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      cmake --build build
+<
+- A terminal font with box-drawing and braille characters. Without them, use
+  `theme = "ascii"`.
+
+==============================================================================
+2. SETUP                                    *tracespace-setup* *tracespace.setup()*
+
+The plugin lives in the `nvim/` directory of the tracespace repository. Add
+that directory to 'runtimepath', for example with lazy.nvim: >lua
+
+    {
+      dir = "~/src/tracespace/nvim",
+      cmd = "Tracespace",
+      opts = { binary = "~/src/tracespace/build/tracespace" },
+    }
+<
+or by hand: >lua
+
+    vim.opt.runtimepath:append("~/src/tracespace/nvim")
+    require("tracespace").setup({})
+<
+Calling `setup()` is optional; without it the defaults below apply.
+
+Options, with their defaults: >lua
+
+    require("tracespace").setup({
+      binary = "tracespace",  -- executable name or full path
+      width = 60,             -- columns when position is "left"/"right"
+      height = 15,            -- rows when position is "top"/"bottom"
+      position = "right",     -- "right", "left", "top" or "bottom"
+      theme = "braille",      -- "braille", "rounded" or "ascii"
+      debounce_ms = 50,       -- delay before a changed buffer is sent
+      args = {},              -- extra arguments, e.g. { "--no-anim" }
+    })
+<
+==============================================================================
+3. COMMANDS                                               *tracespace-commands*
+
+                                                                  *:Tracespace*
+:Tracespace         Open the diagram in a split for the current buffer and
+                    start streaming it. Run it again to close the split and
+                    stop the program.
+
+Only buffers whose 'filetype' is `c` or `cpp` are sent. When you switch to
+another C/C++ buffer the diagram switches with you. Files ending in `.c` or
+`.h` are parsed as C, everything else as C++.
+
+==============================================================================
+4. KEYS IN THE DIAGRAM                                        *tracespace-keys*
+
+Move into the diagram window (for example with |CTRL-W_l|); it enters
+terminal mode so keys go to the diagram. Leave with <C-\><C-n>, or press
+<Enter> on a box, which jumps back to your code.
+
+    <Left> <Right>      move along the row
+    <Up> <Down>         move between a box and its children
+    <Enter>             jump to the selected box's code
+    <Space>             collapse or expand the selected box
+    <Tab>               switch between execution order and source order
+    <S-Left> <S-Right>  scroll sideways (also `[`, `]` and the mouse wheel)
+    T                   cycle the arc theme
+    L                   show or hide library calls
+    ?                   help
+    q                   quit (also closes the split)
+
+A mouse click selects a box.
+
+The box of the function under your editor cursor is highlighted, and so is
+the innermost loop or branch around the cursor.
+
+==============================================================================
+5. READING THE DIAGRAM                                      *tracespace-legend*
+
+    box                 a function; the top row is `main` followed by the
+                        calls it makes, in order
+    boxes below a box   the calls that function makes
+    arc with `×N`       a loop; `×?` when the count is not a constant,
+                        `×∞` for `while (true)` and `for (;;)`
+    stacked lanes       `if` / `else` / `switch` branches, labelled with
+                        their conditions
+    `⏎`                 the function returns early
+    `⇥` `↺`             the loop contains `break` / `continue`
+    `↻`                 a recursive call, not expanded again
+    dashed box `?(x)`   a call through a function pointer or virtual
+                        method; known candidates are listed inside
+    dashed arrow        a `goto` and its label
+    `⚠`                 this function currently has a parse error
+    `▸ N`               a collapsed box hiding N boxes
+
+Calls are matched by name only. Functions that are not defined in the file
+(library calls) are hidden until you press `L`.
+
+==============================================================================
+6. LUA API                                                     *tracespace-api*
+
+require("tracespace").setup({opts})          See |tracespace.setup()|.
+require("tracespace").open()                 Open the split.
+require("tracespace").close()                Close it and stop the program.
+require("tracespace").toggle()               What |:Tracespace| does.
+require("tracespace").is_open()              True while the split exists.
+require("tracespace").is_connected()         True while the buffer is being
+                                             streamed.
+
+Example mapping: >lua
+
+    vim.keymap.set("n", "<leader>tt", "<cmd>Tracespace<cr>")
+<
+==============================================================================
+7. HOW IT WORKS                                           *tracespace-protocol*
+
+|:Tracespace| starts `tracespace --socket <path> <file>` in a terminal split
+and connects to that socket with |uv.new_pipe()|. On Linux and macOS the
+socket is a Unix domain socket in Neovim's temporary directory; on Windows it
+is a named pipe (`\\.\pipe\tracespace-...`).
+
+Messages are JSON objects, one per line. Lines are 1-based and columns
+0-based, as in |nvim_win_get_cursor()|.
+
+    Neovim to tracespace: >
+        {"type":"buffer","path":"...","text":"...","cursor":[line,col]}
+        {"type":"cursor","cursor":[line,col]}
+<
+    tracespace to Neovim: >
+        {"type":"jump","path":"...","line":N,"col":M}
+<
+The buffer is sent on |TextChanged| and |TextChangedI| (debounced) and the
+cursor on |CursorMoved| and |CursorMovedI|. While Neovim is connected, the
+buffer contents take priority over the file on disk. The socket and the
+program are cleaned up when the split is closed and on |VimLeavePre|.
+
+==============================================================================
+8. TROUBLESHOOTING                                 *tracespace-troubleshooting*
+
+"executable not found"
+    Set `binary` to the full path of the built program.
+
+Boxes or arcs show as `?` or misaligned blocks
+    The font lacks box-drawing or braille glyphs. Use `theme = "ascii"`, or
+    `theme = "rounded"` if only braille is missing.
+
+The diagram says "nvim ○ (waiting)"
+    The program is running but the plugin has not connected. Close and
+    reopen with |:Tracespace|.
+
+Nothing is drawn for my file
+    Only functions defined in the file are drawn. The current buffer must
+    have 'filetype' `c` or `cpp`.
+
+ vim:tw=78:ts=8:ft=help:norl:
